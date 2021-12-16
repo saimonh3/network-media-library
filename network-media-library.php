@@ -48,12 +48,21 @@ if ( ! is_multisite() ) {
 }
 
 /**
+ * Don't run if not on a PIC site
+ */
+$supported_sites = array( 3, 7, 9, 12, 13, 15, 16, 17, 18, 19, 20, 22, 26, 28, 29 );
+
+if ( ! in_array( get_current_blog_id(), $supported_sites, true ) ) {
+	return;
+}
+
+/**
  * The ID of the site on the network which acts as the network media library. Change this value with the help
  * of the filter hook `network-media-library/site_id`.
  *
  * @var int The network media library site ID.
  */
-const SITE_ID = 2;
+const SITE_ID = 3;
 
 /**
  * Returns the ID of the site which acts as the network media library.
@@ -81,7 +90,7 @@ function get_site_id() : int {
 	 *
 	 * @param int $site_id The network media library site ID.
 	 */
-	$site_id = (int) apply_filters_deprecated( 'global_media.site_id', [ $site_id ], '1.0.0', 'network-media-library/site_id' );
+	$site_id = (int) apply_filters_deprecated( 'global_media.site_id', array( $site_id ), '1.0.0', 'network-media-library/site_id' );
 
 	return $site_id;
 }
@@ -168,27 +177,37 @@ function admin_post_thumbnail_html( string $content, $post_id, $thumbnail_id ) :
  * @param bool         $icon          Whether the image should be treated as an icon.
  * @return array|false Either array with src, width & height, icon src, or false.
  */
-add_filter( 'wp_get_attachment_image_src', function( $image, $attachment_id, $size, bool $icon ) {
-	static $switched = false;
+add_filter(
+	'wp_get_attachment_image_src',
+	function( $image, $attachment_id, $size, bool $icon ) {
+		
+		if ( ! empty( $image ) ) {
+			return $image;
+		}
 
-	if ( $switched ) {
+		static $switched = false;
+
+		if ( $switched ) {
+			return $image;
+		}
+
+		if ( is_media_site() ) {
+			return $image;
+		}
+
+		switch_to_media_site();
+
+		$switched = true;
+		$image    = wp_get_attachment_image_src( $attachment_id, $size, $icon );
+		$switched = false;
+
+		restore_current_blog();
+
 		return $image;
-	}
-
-	if ( is_media_site() ) {
-		return $image;
-	}
-
-	switch_to_media_site();
-
-	$switched = true;
-	$image    = wp_get_attachment_image_src( $attachment_id, $size, $icon );
-	$switched = false;
-
-	restore_current_blog();
-
-	return $image;
-}, 999, 4 );
+	},
+	999,
+	4
+);
 
 /**
  * Filters the default gallery shortcode output so it shows media from the network media library site.
@@ -220,27 +239,34 @@ add_action( 'load-async-upload.php', __NAMESPACE__ . '\prevent_attaching', 0 );
 add_action( 'wp_ajax_upload-attachment', __NAMESPACE__ . '\prevent_attaching', 0 );
 
 // Allow access to the "List" mode on the Media screen.
-add_action( 'parse_request', function() {
-	if ( is_media_site() ) {
-		return;
-	}
+add_action(
+	'parse_request',
+	function() {
+		if ( is_media_site() ) {
+			return;
+		}
 
-	if ( ! function_exists( 'get_current_screen' ) || 'upload' !== get_current_screen()->id ) {
-		return;
-	}
+		if ( ! function_exists( 'get_current_screen' ) || 'upload' !== get_current_screen()->id ) {
+			return;
+		}
 
-	switch_to_media_site();
+		switch_to_media_site();
 
-	add_filter( 'posts_pre_query', function( $value ) {
-		restore_current_blog();
+		add_filter(
+			'posts_pre_query',
+			function( $value ) {
+				restore_current_blog();
 
-		return $value;
-	} );
+				return $value;
+			}
+		);
 
-	add_action( 'loop_start', __NAMESPACE__ . '\switch_to_media_site', 0 );
-	add_action( 'loop_stop', 'restore_current_blog', 999 );
+		add_action( 'loop_start', __NAMESPACE__ . '\switch_to_media_site', 0 );
+		add_action( 'loop_stop', 'restore_current_blog', 999 );
 
-}, 0 );
+	},
+	0
+);
 
 // Allow attachment details to be fetched and saved.
 add_action( 'wp_ajax_get-attachment', __NAMESPACE__ . '\switch_to_media_site', 0 );
@@ -269,17 +295,22 @@ add_action( 'wp_ajax_assign_wp_user_avatars_media', __NAMESPACE__ . '\switch_to_
  * @param array|bool $meta       Array of attachment meta data, or boolean false if there is none.
  * @return array Array of prepared attachment data.
  */
-add_filter( 'wp_prepare_attachment_for_js', function( array $response, \WP_Post $attachment, $meta ) : array {
-	if ( is_media_site() ) {
+add_filter(
+	'wp_prepare_attachment_for_js',
+	function( array $response, \WP_Post $attachment, $meta ) : array {
+		if ( is_media_site() ) {
+			return $response;
+		}
+
+		// Prevent media from being deleted from any site other than the network media library site.
+		// This is needed in order to prevent incorrect posts from being deleted on the local site.
+		unset( $response['nonces']['delete'] );
+
 		return $response;
-	}
-
-	// Prevent media from being deleted from any site other than the network media library site.
-	// This is needed in order to prevent incorrect posts from being deleted on the local site.
-	unset( $response['nonces']['delete'] );
-
-	return $response;
-}, 0, 3 );
+	},
+	0,
+	3
+);
 
 /**
  * Filters the pre-dispatch value of REST API requests in order to switch to the network media library site when querying media.
@@ -289,30 +320,35 @@ add_filter( 'wp_prepare_attachment_for_js', function( array $response, \WP_Post 
  * @param WP_REST_Server  $this    Server instance.
  * @param WP_REST_Request $request Request used to generate the response.
  */
-add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP_REST_Request $request ) {
-	if ( ! defined( 'REST_REQUEST' ) || ! REST_REQUEST ) {
-		return $result;
-	}
-
-	if ( is_media_site() ) {
-		return $result;
-	}
-
-	$media_routes = [
-		'/wp/v2/media',
-		'/regenerate-thumbnails/',
-	];
-
-	foreach ( $media_routes as $route ) {
-		if ( 0 === strpos( $request->get_route(), $route ) ) {
-			$request->set_param( 'post', null );
-			switch_to_media_site();
-			break;
+add_filter(
+	'rest_pre_dispatch',
+	function( $result, \WP_REST_Server $server, \WP_REST_Request $request ) {
+		if ( ! defined( 'REST_REQUEST' ) || ! REST_REQUEST ) {
+			return $result;
 		}
-	}
 
-	return $result;
-}, 0, 3 );
+		if ( is_media_site() ) {
+			return $result;
+		}
+
+		$media_routes = array(
+			'/wp/v2/media',
+			'/regenerate-thumbnails/',
+		);
+
+		foreach ( $media_routes as $route ) {
+			if ( 0 === strpos( $request->get_route(), $route ) ) {
+				$request->set_param( 'post', null );
+				switch_to_media_site();
+				break;
+			}
+		}
+
+		return $result;
+	},
+	0,
+	3
+);
 
 /**
  * Fires after the XML-RPC user has been authenticated, but before the rest of the method logic begins, in order to
@@ -320,17 +356,21 @@ add_filter( 'rest_pre_dispatch', function( $result, \WP_REST_Server $server, \WP
  *
  * @param string $name The method name.
  */
-add_action( 'xmlrpc_call', function( string $name ) {
-	$media_methods = [
-		'metaWeblog.newMediaObject',
-		'wp.getMediaItem',
-		'wp.getMediaLibrary',
-	];
+add_action(
+	'xmlrpc_call',
+	function( string $name ) {
+		$media_methods = array(
+			'metaWeblog.newMediaObject',
+			'wp.getMediaItem',
+			'wp.getMediaLibrary',
+		);
 
-	if ( in_array( $name, $media_methods, true ) ) {
-		switch_to_media_site();
-	}
-}, 0 );
+		if ( in_array( $name, $media_methods, true ) ) {
+			switch_to_media_site();
+		}
+	},
+	0
+);
 
 /**
  * Apply the current site's `upload_files` capability to the network media site.
@@ -350,7 +390,7 @@ function allow_media_library_access( array $caps, string $cap, int $user_id, arr
 		return $caps;
 	}
 
-	if ( ! in_array( $cap, [ 'edit_post', 'upload_files' ], true ) ) {
+	if ( ! in_array( $cap, array( 'edit_post', 'upload_files' ), true ) ) {
 		return $caps;
 	}
 
@@ -376,7 +416,7 @@ function allow_media_library_access( array $caps, string $cap, int $user_id, arr
 	add_filter( 'map_meta_cap', __NAMESPACE__ . '\allow_media_library_access', 10, 4 );
 	restore_current_blog();
 
-	return ( $user_has_permission ? [ 'exist' ] : $caps );
+	return ( $user_has_permission ? array( 'exist' ) : $caps );
 }
 
 /**
@@ -420,14 +460,14 @@ class ACF_Value_Filter {
 	 * Sets up the necessary action and filter callbacks.
 	 */
 	public function __construct() {
-		$field_types = [
+		$field_types = array(
 			'image',
 			'file',
-		];
+		);
 
 		foreach ( $field_types as $type ) {
-			add_filter( "acf/load_value/type={$type}", [ $this, 'filter_acf_attachment_load_value' ], 0, 3 );
-			add_filter( "acf/format_value/type={$type}", [ $this, 'filter_acf_attachment_format_value' ], 9999, 3 );
+			add_filter( "acf/load_value/type={$type}", array( $this, 'filter_acf_attachment_load_value' ), 0, 3 );
+			add_filter( "acf/format_value/type={$type}", array( $this, 'filter_acf_attachment_format_value' ), 9999, 3 );
 		}
 	}
 
@@ -493,8 +533,8 @@ class ACF_Field_Rendering {
 	 * Sets up the necessary action and filter callbacks.
 	 */
 	public function __construct() {
-		add_action( 'acf/render_field', [ $this, 'maybe_restore_current_blog' ], -999 );
-		add_action( 'acf/render_field/type=file', [ $this, 'maybe_switch_to_media_site' ], 0 );
+		add_action( 'acf/render_field', array( $this, 'maybe_restore_current_blog' ), -999 );
+		add_action( 'acf/render_field/type=file', array( $this, 'maybe_switch_to_media_site' ), 0 );
 	}
 
 	/**
@@ -535,14 +575,16 @@ class Post_Thumbnail_Saver {
 	 *
 	 * @var int[] Array of featured image IDs keyed by their post ID.
 	 */
-	protected $thumbnail_ids = [];
+	protected $thumbnail_ids = array();
 
 	/**
 	 * Sets up the necessary action and filter callbacks.
 	 */
 	public function __construct() {
-		add_filter( 'wp_insert_post_data', [ $this, 'filter_wp_insert_post_data' ], 10, 2 );
-		add_action( 'save_post', [ $this, 'action_save_post' ], 10, 3 );
+		add_filter( 'wp_insert_post_data', array( $this, 'filter_wp_insert_post_data' ), 10, 2 );
+		add_action( 'save_post', array( $this, 'action_save_post' ), 10, 3 );		
+		add_action( 'rest_insert_post', array( $this, 'save_featured_media' ), 10, 2 );
+		add_action( 'rest_insert_page', array( $this, 'save_featured_media' ), 10, 2 );
 	}
 
 	/**
@@ -552,7 +594,7 @@ class Post_Thumbnail_Saver {
 	 * @param array $postarr An array of sanitized, but otherwise unmodified post data.
 	 * @return array An array of slashed post data.
 	 */
-	public function filter_wp_insert_post_data( array $data, array $postarr ) : array {
+	public function filter_wp_insert_post_data( array $data, array $postarr ) : array {	
 		if ( ! empty( $postarr['_thumbnail_id'] ) ) {
 			$this->thumbnail_ids[ $postarr['ID'] ] = intval( $postarr['_thumbnail_id'] );
 		}
@@ -570,6 +612,27 @@ class Post_Thumbnail_Saver {
 	public function action_save_post( $post_id, WP_Post $post, bool $update ) {
 		if ( ! empty( $this->thumbnail_ids[ $post->ID ] ) && ( -1 !== $this->thumbnail_ids[ $post->ID ] ) ) {
 			update_post_meta( $post->ID, '_thumbnail_id', $this->thumbnail_ids[ $post->ID ] );
+		}
+	}
+
+	/**
+	 * On subsites the featured_media must be set manually
+	 *
+	 * @param \WP_Post         $post
+	 * @param \WP_REST_Request $request
+	 *
+	 * @return void
+	 */
+	function save_featured_media( \WP_Post $post, \WP_REST_Request $request ) {
+		$featured_media = $request['featured_media'] ?? '';
+
+		if ( $featured_media ) {
+			// this is the original from rest controller that does not work
+			set_post_thumbnail( $post->ID, $featured_media );
+			// so we set the _thumbnail_id manually
+			update_post_meta( $post->ID, '_thumbnail_id', $featured_media );
+			// now we unset the featured_image (so the REST controller can't interfere)
+			unset( $request['featured_media'] );
 		}
 	}
 
